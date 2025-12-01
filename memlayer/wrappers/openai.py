@@ -276,16 +276,9 @@ class OpenAI(BaseLLMWrapper):
         
         # CONSOLIDATE IMMEDIATELY when user sends message (before LLM even processes it!)
         # This starts the background consolidation as early as possible
-        # Convert first-person statements to third-person for better extraction
-        # e.g., "My name is Sarah" -> "The user's name is Sarah"
+        # Keep the original first-person text - the LLM can understand it naturally
         if user_query:
-            # Simple conversion: "My/I/I'm" -> "The user's/The user/The user is"
-            consolidated_text = user_query
-            consolidated_text = re.sub(r'\bMy\s+', 'The user\'s ', consolidated_text, flags=re.IGNORECASE)
-            consolidated_text = re.sub(r'\bI\'m\s+', 'The user is ', consolidated_text, flags=re.IGNORECASE)
-            consolidated_text = re.sub(r'\bI\s+am\s+', 'The user is ', consolidated_text, flags=re.IGNORECASE)
-            consolidated_text = re.sub(r'\bI\s+(work|live|study|prefer|like|love|hate|want|need)\s+', r'The user \1s ', consolidated_text, flags=re.IGNORECASE)
-            self.consolidation_service.consolidate(consolidated_text, self.user_id)
+            self.consolidation_service.consolidate(user_query, self.user_id)
         
         triggered_context = self.search_service.get_triggered_tasks_context(self.user_id)
         if triggered_context:
@@ -597,6 +590,13 @@ class OpenAI(BaseLLMWrapper):
         system_prompt = f"""
 You are a Knowledge Graph Engineer AI. Your task is to analyze text and deconstruct it into a structured knowledge graph.
 The current date and time is {current_datetime}.
+
+IMPORTANT RULES for first-person text:
+- When text says "My name is X", extract entity "X" (not "I" or "the user")
+- When text says "I work at Y", extract entity "Y" and create relationships using the person's actual name
+- If the person's name is mentioned, use it as the entity. Otherwise, you may use a generic identifier.
+- Avoid creating separate entities for "I", "me", "my", "the user" - resolve them to the actual person's name if mentioned.
+
 You must identify:
 1.  **facts**: A list of simple, atomic statements. For each fact, assign an 'importance_score' (float 0.1-1.0) and an 'expiration_date' (ISO 8601 string or null if it doesn't expire).
 2.  **entities**: A list of key nouns (people, places, projects). Each entity should have a 'name' and a 'type'.
@@ -604,10 +604,10 @@ You must identify:
 
 Respond ONLY with a valid JSON object.
 
-Example Input:
+Example Input (third-person):
 "John confirmed the temporary door code is 1234 for the next 24 hours. This is for Project Phoenix, which is our top priority."
 
-Example JSON Output:
+Example Output:
 {{
   "facts": [
     {{"fact": "The temporary door code is 1234.", "importance_score": 0.8, "expiration_date": "2025-11-16T14:30:00Z"}},
@@ -619,6 +619,25 @@ Example JSON Output:
   ],
   "relationships": [
     {{"subject": "John", "predicate": "works on", "object": "Project Phoenix"}}
+  ]
+}}
+
+Example Input (first-person):
+"My name is Alice and I work as a software engineer at TechCorp."
+
+Example Output:
+{{
+  "facts": [
+    {{"fact": "Alice works as a software engineer at TechCorp.", "importance_score": 0.9, "expiration_date": null}}
+  ],
+  "entities": [
+    {{"name": "Alice", "type": "Person"}},
+    {{"name": "TechCorp", "type": "Organization"}},
+    {{"name": "software engineer", "type": "Role"}}
+  ],
+  "relationships": [
+    {{"subject": "Alice", "predicate": "works as", "object": "software engineer"}},
+    {{"subject": "Alice", "predicate": "works at", "object": "TechCorp"}}
   ]
 }}
 """
