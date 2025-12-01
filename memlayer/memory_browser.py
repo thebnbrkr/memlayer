@@ -13,6 +13,7 @@ Works with any vector backend (Chroma, Qdrant, Zilliz).
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 import json
+import statistics
 
 
 class MemoryBrowser:
@@ -452,14 +453,13 @@ class MemoryBrowser:
                 if embeddings and i < len(embeddings) and embeddings[i]:
                     embedding = embeddings[i]
                     # Calculate embedding statistics
-                    import statistics
-                    emb_min = min(embedding)
-                    emb_max = max(embedding)
-                    emb_mean = statistics.mean(embedding)
-                    emb_std = statistics.stdev(embedding) if len(embedding) > 1 else 0
+                    embedding_min = min(embedding)
+                    embedding_max = max(embedding)
+                    embedding_mean = statistics.mean(embedding)
+                    embedding_std_dev = statistics.stdev(embedding) if len(embedding) > 1 else 0
 
-                    print(f"   Embedding stats: min={emb_min:.4f}, max={emb_max:.4f}, "
-                          f"mean={emb_mean:.4f}, std={emb_std:.4f}")
+                    print(f"   Embedding stats: min={embedding_min:.4f}, max={embedding_max:.4f}, "
+                          f"mean={embedding_mean:.4f}, std={embedding_std_dev:.4f}")
 
                     if show_vector:
                         truncated = embedding[:truncate_vector]
