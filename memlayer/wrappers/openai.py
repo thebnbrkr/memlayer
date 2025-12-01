@@ -194,12 +194,17 @@ class OpenAI(BaseLLMWrapper):
         """Lazy-load vector storage only when needed. Returns None in LIGHTWEIGHT mode."""
         if self.operation_mode == "lightweight":
             return None  # LIGHTWEIGHT mode uses graph-only storage
-            
+
         if self._vector_storage is None:
             from ..storage.chroma import ChromaStorage
             self._vector_storage = ChromaStorage(self.storage_path, dimension=self.embedding_model.dimension)
         return self._vector_storage
-    
+
+    @property
+    def storage(self) -> "ChromaStorage":
+        """Alias for vector_storage (for backwards compatibility)."""
+        return self.vector_storage
+
     @property
     def graph_storage(self) -> "NetworkXStorage":
         """Lazy-load graph storage only when needed."""
