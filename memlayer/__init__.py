@@ -10,6 +10,11 @@ Supported exports:
 - ``Claude``
 - ``Gemini``
 - ``Ollama``
+- ``GraphVisualizer``
+- ``MemoryBrowser``
+- ``TenantSalienceConfig``
+- ``SalienceCalculator``
+- ``salience_router``
 """
 
 __version__ = "0.1.8"
@@ -45,8 +50,40 @@ def __getattr__(name):
         from .wrappers import Ollama
 
         return Ollama
+    if name == "GraphVisualizer":
+        from .visualization import GraphVisualizer
+
+        return GraphVisualizer
+    if name == "MemoryBrowser":
+        from .memory_browser import MemoryBrowser
+
+        return MemoryBrowser
+    if name == "TenantSalienceConfig":
+        from .config.salience import TenantSalienceConfig
+
+        return TenantSalienceConfig
+    if name == "SalienceCalculator":
+        from .services.salience_calculator import SalienceCalculator
+
+        return SalienceCalculator
+    if name == "salience_router":
+        from .routes.salience_config import router
+
+        return router
     raise AttributeError(f"module '{__name__}' has no attribute '{name}'")
 
 
-__all__ = ["Memory", "OpenAI", "Claude", "Gemini", "Ollama", "LMStudio"]
+__all__ = [
+    "Memory",
+    "OpenAI",
+    "Claude",
+    "Gemini",
+    "Ollama",
+    "LMStudio",
+    "GraphVisualizer",
+    "MemoryBrowser",
+    "TenantSalienceConfig",
+    "SalienceCalculator",
+    "salience_router",
+]
 

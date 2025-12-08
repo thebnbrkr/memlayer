@@ -61,11 +61,13 @@ class OpenAI(BaseLLMWrapper):
         operation_mode: str = "online",
         scheduler_interval_seconds: int = 60,  # For tasks
         curation_interval_seconds: int = 3600,  # For curation
+        salience_config: Optional["TenantSalienceConfig"] = None,  # NEW
+        tenant_id: Optional[str] = None,  # NEW
         **kwargs
     ):
         """
         Initialize a memory-enhanced OpenAI client.
-        
+
         Args:
             api_key: OpenAI API key (if None, will use OPENAI_API_KEY env var)
             model: Model name to use (e.g., "gpt-4.1", "gpt-4.1-mini")
@@ -75,8 +77,11 @@ class OpenAI(BaseLLMWrapper):
             embedding_model: Custom embedding model (defaults to LocalEmbeddingModel)
             salience_threshold: Threshold for memory worthiness (-0.1 to 0.2, default 0.0)
                               Lower = more permissive, Higher = more strict
-            operation_mode: Memory mode - "local" (sentence-transformers), 
+            operation_mode: Memory mode - "local" (sentence-transformers),
                           "online" (OpenAI embeddings API), or "lightweight" (graph-only, no embeddings)
+            salience_config: (NEW) Custom salience configuration (TenantSalienceConfig).
+                           If provided, overrides the default salience threshold.
+            tenant_id: (NEW) Tenant identifier for multi-tenancy. Defaults to user_id if not provided.
             **kwargs: Additional arguments passed to openai.OpenAI()
         """
         self.model = model
@@ -88,6 +93,8 @@ class OpenAI(BaseLLMWrapper):
         self._provided_embedding_model = embedding_model
         self.scheduler_interval_seconds = scheduler_interval_seconds
         self.curation_interval_seconds = curation_interval_seconds
+        self.salience_config = salience_config  # NEW
+        self.tenant_id = tenant_id or user_id  # NEW: Default to user_id
         # Lazy-loaded attributes
         self._embedding_model = None
         self._vector_storage = None
@@ -194,12 +201,17 @@ class OpenAI(BaseLLMWrapper):
         """Lazy-load vector storage only when needed. Returns None in LIGHTWEIGHT mode."""
         if self.operation_mode == "lightweight":
             return None  # LIGHTWEIGHT mode uses graph-only storage
-            
+
         if self._vector_storage is None:
             from ..storage.chroma import ChromaStorage
             self._vector_storage = ChromaStorage(self.storage_path, dimension=self.embedding_model.dimension)
         return self._vector_storage
-    
+
+    @property
+    def storage(self) -> "ChromaStorage":
+        """Alias for vector_storage (for backwards compatibility)."""
+        return self.vector_storage
+
     @property
     def graph_storage(self) -> "NetworkXStorage":
         """Lazy-load graph storage only when needed."""
@@ -247,9 +259,20 @@ class OpenAI(BaseLLMWrapper):
                 self.graph_storage,
                 self.embedding_model,
                 self.salience_gate,
-                llm_client=self
+                llm_client=self,
+                salience_config=self.salience_config,  # NEW
+                tenant_id=self.tenant_id  # NEW
             )
         return self._consolidation_service
+
+    def get_salience_logs(self):
+        """
+        Get salience computation logs (only available when using custom salience_config).
+
+        Returns:
+            List of salience computation logs with scores, decisions, and reasoning.
+        """
+        return self.consolidation_service.salience_logs
     
     def chat(self, messages: List[Dict[str, str]], stream: bool = False, **kwargs):
         """
@@ -271,16 +294,9 @@ class OpenAI(BaseLLMWrapper):
         
         # CONSOLIDATE IMMEDIATELY when user sends message (before LLM even processes it!)
         # This starts the background consolidation as early as possible
-        # Convert first-person statements to third-person for better extraction
-        # e.g., "My name is Sarah" -> "The user's name is Sarah"
+        # Keep the original first-person text - the LLM can understand it naturally
         if user_query:
-            # Simple conversion: "My/I/I'm" -> "The user's/The user/The user is"
-            consolidated_text = user_query
-            consolidated_text = re.sub(r'\bMy\s+', 'The user\'s ', consolidated_text, flags=re.IGNORECASE)
-            consolidated_text = re.sub(r'\bI\'m\s+', 'The user is ', consolidated_text, flags=re.IGNORECASE)
-            consolidated_text = re.sub(r'\bI\s+am\s+', 'The user is ', consolidated_text, flags=re.IGNORECASE)
-            consolidated_text = re.sub(r'\bI\s+(work|live|study|prefer|like|love|hate|want|need)\s+', r'The user \1s ', consolidated_text, flags=re.IGNORECASE)
-            self.consolidation_service.consolidate(consolidated_text, self.user_id)
+            self.consolidation_service.consolidate(user_query, self.user_id)
         
         triggered_context = self.search_service.get_triggered_tasks_context(self.user_id)
         if triggered_context:
@@ -592,6 +608,13 @@ class OpenAI(BaseLLMWrapper):
         system_prompt = f"""
 You are a Knowledge Graph Engineer AI. Your task is to analyze text and deconstruct it into a structured knowledge graph.
 The current date and time is {current_datetime}.
+
+IMPORTANT RULES for first-person text:
+- When text says "My name is X", extract entity "X" (not "I" or "the user")
+- When text says "I work at Y", extract entity "Y" and create relationships using the person's actual name
+- If the person's name is mentioned, use it as the entity. Otherwise, you may use a generic identifier.
+- Avoid creating separate entities for "I", "me", "my", "the user" - resolve them to the actual person's name if mentioned.
+
 You must identify:
 1.  **facts**: A list of simple, atomic statements. For each fact, assign an 'importance_score' (float 0.1-1.0) and an 'expiration_date' (ISO 8601 string or null if it doesn't expire).
 2.  **entities**: A list of key nouns (people, places, projects). Each entity should have a 'name' and a 'type'.
@@ -599,10 +622,10 @@ You must identify:
 
 Respond ONLY with a valid JSON object.
 
-Example Input:
+Example Input (third-person):
 "John confirmed the temporary door code is 1234 for the next 24 hours. This is for Project Phoenix, which is our top priority."
 
-Example JSON Output:
+Example Output:
 {{
   "facts": [
     {{"fact": "The temporary door code is 1234.", "importance_score": 0.8, "expiration_date": "2025-11-16T14:30:00Z"}},
@@ -614,6 +637,25 @@ Example JSON Output:
   ],
   "relationships": [
     {{"subject": "John", "predicate": "works on", "object": "Project Phoenix"}}
+  ]
+}}
+
+Example Input (first-person):
+"My name is Alice and I work as a software engineer at TechCorp."
+
+Example Output:
+{{
+  "facts": [
+    {{"fact": "Alice works as a software engineer at TechCorp.", "importance_score": 0.9, "expiration_date": null}}
+  ],
+  "entities": [
+    {{"name": "Alice", "type": "Person"}},
+    {{"name": "TechCorp", "type": "Organization"}},
+    {{"name": "software engineer", "type": "Role"}}
+  ],
+  "relationships": [
+    {{"subject": "Alice", "predicate": "works as", "object": "software engineer"}},
+    {{"subject": "Alice", "predicate": "works at", "object": "TechCorp"}}
   ]
 }}
 """

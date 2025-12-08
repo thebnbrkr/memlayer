@@ -2,10 +2,13 @@ import time
 import uuid
 import chromadb
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
-class ChromaStorage:
+from memlayer.storage.vector_backend import VectorBackend
+
+
+class ChromaStorage(VectorBackend):
     """
     A vector storage backend using the embedded, on-disk version of ChromaDB.
     """
@@ -28,41 +31,114 @@ class ChromaStorage:
         )
         print(f"Memlayer (ChromaDB) initialized at: {self.db_path} for dimension {dimension}")
 
-    def add_memory(self, content: str, embedding: List[float], user_id: str = "default_user", metadata: Dict = None):
-        """Adds a new memory with initial lifecycle metadata."""
-        doc_metadata = metadata or {}
-        # --- NEW: Add lifecycle attributes at creation ---
-        base_attrs = {
-            "user_id": user_id,
-            "timestamp": time.time(),
-            "content": content,
-            "status": "active",
-            "access_count": 0,
-            "last_accessed_timestamp": time.time(),
-            "importance_score": 0.5,
-        }
-        base_attrs.update(doc_metadata)
-        
-        # ChromaDB only accepts str, int, float, or bool - filter out None values
-        base_attrs = {k: v for k, v in base_attrs.items() if v is not None}
-        
-        memory_id = f"mem_{uuid.uuid4().hex}"
+    @property
+    def backend_type(self) -> str:
+        """Return backend type identifier."""
+        return "chroma"
+
+    def add_memories(
+        self,
+        contents: List[str],
+        embeddings: List[List[float]],
+        user_ids: List[str],
+        metadatas: Optional[List[Dict[str, Any]]] = None,
+        ids: Optional[List[str]] = None
+    ) -> List[str]:
+        """
+        Add memories to ChromaDB (batch operation).
+
+        This is the VectorBackend interface method.
+        """
+        if metadatas is None:
+            metadatas = [{} for _ in contents]
+
+        if ids is None:
+            ids = [f"mem_{uuid.uuid4().hex}" for _ in contents]
+
+        now = time.time()
+
+        # Prepare batch data
+        batch_metadatas = []
+        batch_documents = []
+
+        for i, (content, user_id, metadata) in enumerate(zip(contents, user_ids, metadatas)):
+            base_attrs = {
+                "user_id": user_id,
+                "timestamp": now,
+                "content": content,
+                "status": "active",
+                "access_count": 0,
+                "last_accessed_timestamp": now,
+                "importance_score": metadata.get("importance_score", 0.5),
+            }
+
+            # Add expiration_timestamp if provided
+            if metadata.get("expiration_timestamp") is not None:
+                base_attrs["expiration_timestamp"] = metadata["expiration_timestamp"]
+
+            # Filter out None values (ChromaDB only accepts str, int, float, bool)
+            base_attrs = {k: v for k, v in base_attrs.items() if v is not None}
+
+            batch_metadatas.append(base_attrs)
+            batch_documents.append(content[:100])
+
+        # Batch insert
         self.collection.add(
-            ids=[memory_id],
-            embeddings=[embedding],
-            metadatas=[base_attrs],
-            documents=[content[:100]]
+            ids=ids,
+            embeddings=embeddings,
+            metadatas=batch_metadatas,
+            documents=batch_documents
         )
 
-    def search_memories(self, query_embedding: List[float], user_id: str = "default_user", top_k: int = 5) -> List[Dict[str, Any]]:
-        """Searches only for 'active' memories."""
-        # --- NEW: Filter out archived memories ---
-        where_filter = {
-            "$and": [
-                {"user_id": {"$eq": user_id}},
-                {"status": {"$eq": "active"}}
-            ]
-        }
+        return ids
+
+    def add_memory(self, content: str, embedding: List[float], user_id: str = "default_user", metadata: Dict = None):
+        """
+        Adds a single memory (backwards compatibility).
+
+        This is a convenience method that calls add_memories internally.
+        """
+        metadata = metadata or {}
+        ids = self.add_memories(
+            contents=[content],
+            embeddings=[embedding],
+            user_ids=[user_id],
+            metadatas=[metadata]
+        )
+        return ids[0]
+
+    def search_memories(
+        self,
+        query_embedding: List[float],
+        user_id: str = "default_user",
+        top_k: int = 5,
+        filter_dict: Optional[Dict[str, Any]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Searches for similar memories (VectorBackend interface).
+
+        Args:
+            query_embedding: Query vector
+            user_id: User identifier
+            top_k: Number of results
+            filter_dict: Additional filters (optional)
+
+        Returns:
+            List of dicts with keys: id, content, metadata, score
+        """
+        # Build filter
+        where_conditions = [
+            {"user_id": {"$eq": user_id}},
+            {"status": {"$eq": "active"}}
+        ]
+
+        # Add additional filters if provided
+        if filter_dict:
+            for key, value in filter_dict.items():
+                where_conditions.append({key: {"$eq": value}})
+
+        where_filter = {"$and": where_conditions}
+
         results = self.collection.query(
             query_embeddings=[query_embedding],
             n_results=top_k,
@@ -119,16 +195,35 @@ class ChromaStorage:
         if new_metadatas:
             self.collection.update(ids=memory_ids, metadatas=new_metadatas)
 
-    def get_all_memories_for_curation(self) -> List[Dict]:
-        """Returns all memories with their lifecycle metadata."""
+    def get_all_memories_for_curation(self, user_id: Optional[str] = None) -> List[Dict]:
+        """
+        Returns all memories with their lifecycle metadata (VectorBackend interface).
+
+        Args:
+            user_id: Optional user filter (None = all users)
+
+        Returns:
+            List of memory dicts with full metadata
+        """
         # Note: Chroma's get() without IDs can be slow on huge collections.
         # For production, this might need batching. For now, this is fine.
-        results = self.collection.get(include=["metadatas"])
+        if user_id:
+            # Filter by user_id
+            results = self.collection.get(
+                where={"user_id": {"$eq": user_id}},
+                include=["metadatas"]
+            )
+        else:
+            # Get all memories
+            results = self.collection.get(include=["metadatas"])
+
         memories = []
         for i, meta in enumerate(results['metadatas']):
-            memory_data = meta.copy()
-            memory_data['id'] = results['ids'][i]
-            memories.append(memory_data)
+            memories.append({
+                "id": results['ids'][i],
+                "content": meta.get("content", ""),
+                "metadata": meta
+            })
         return memories
 
     def update_memory_status(self, memory_id: str, new_status: str):
@@ -143,10 +238,32 @@ class ChromaStorage:
             # Memory might not exist in vector store (e.g., only in graph)
             pass
 
-    def delete_memory(self, memory_id: str):
+    def delete_memory(self, memory_id: str) -> bool:
         """Permanently deletes a memory."""
         try:
             self.collection.delete(ids=[memory_id])
+            return True
         except Exception as e:
             # Memory might not exist in vector store
-            pass
+            print(f"[ChromaDB] Error deleting memory: {e}")
+            return False
+
+    def health_check(self) -> Dict[str, Any]:
+        """Check backend health and return status."""
+        try:
+            start = time.time()
+            # Try to count documents
+            count = self.collection.count()
+            latency = (time.time() - start) * 1000
+
+            return {
+                "status": "healthy",
+                "latency_ms": latency,
+                "collection": self.collection.name,
+                "count": count
+            }
+        except Exception as e:
+            return {
+                "status": "unhealthy",
+                "error": str(e)
+            }
