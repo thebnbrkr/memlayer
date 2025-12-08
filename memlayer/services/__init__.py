@@ -264,8 +264,19 @@ class ConsolidationService:
     Handles background consolidation of memories. It is agnostic to the specific
     embedding model and LLM provider used for fact extraction.
     Supports LIGHTWEIGHT mode (graph-only, no vectors).
+
+    NEW: Supports custom salience configurations via TenantSalienceConfig.
     """
-    def __init__(self, vector_storage: Optional[ChromaStorage], graph_storage: MemgraphStorage, embedding_model: Optional[BaseEmbeddingModel], salience_gate: SalienceGate, llm_client: BaseLLMWrapper):
+    def __init__(
+        self,
+        vector_storage: Optional[ChromaStorage],
+        graph_storage: MemgraphStorage,
+        embedding_model: Optional[BaseEmbeddingModel],
+        salience_gate: SalienceGate,
+        llm_client: BaseLLMWrapper,
+        salience_config: Optional["TenantSalienceConfig"] = None,
+        tenant_id: Optional[str] = None
+    ):
         self.storage = vector_storage
         self.graph_storage = graph_storage
         self.embedding_model = embedding_model
@@ -274,6 +285,11 @@ class ConsolidationService:
         self.is_lightweight = (vector_storage is None or embedding_model is None)
         self._consolidation_complete = threading.Event()
         self._consolidation_complete.set()  # Initially set (no consolidation in progress)
+
+        # NEW: Custom salience configuration support
+        self.salience_config = salience_config
+        self.tenant_id = tenant_id
+        self.salience_logs = []  # Store computation logs
 
     def consolidate(self, conversation_text: str, user_id: str):
         """
@@ -296,12 +312,52 @@ class ConsolidationService:
             # This prevents blocking the main thread with API calls
             if is_debug_mode():
                 print(f"[DEBUG] Checking salience for user '{user_id}'")
-            
+
             salience_start = time.time()
-            is_salient = self.salience_gate.is_worth_saving(conversation_text)
-            salience_elapsed = time.time() - salience_start
-            print(f"[CONSOLIDATE] Salience check took {salience_elapsed:.2f}s, result: {is_salient}")
-            
+
+            # NEW: Use custom salience config if provided, otherwise use old salience gate
+            if self.salience_config is not None:
+                # Use new flexible salience system
+                from .salience_calculator import SalienceCalculator
+
+                calculator = SalienceCalculator(
+                    config=self.salience_config,
+                    fact=conversation_text,
+                    tenant_id=self.tenant_id or user_id,
+                    fact_id=None,
+                    embedding_model=self.embedding_model
+                )
+
+                salience_score, decision, log = calculator.compute_salience()
+                is_salient = (decision == "STORE")
+
+                # Store log for later retrieval
+                self.salience_logs.append({
+                    "fact": conversation_text,
+                    "score": salience_score,
+                    "decision": decision,
+                    "component_scores": calculator.component_scores,
+                    "threshold": calculator.threshold,
+                    "matched_rule": calculator.matched_rule,
+                    "reasoning": log.get("reasoning", ""),
+                    "timestamp": time.time()
+                })
+
+                salience_elapsed = time.time() - salience_start
+                print(f"[CONSOLIDATE] Custom salience check took {salience_elapsed:.2f}s, "
+                      f"score: {salience_score:.3f}, threshold: {calculator.threshold:.3f}, "
+                      f"decision: {decision}")
+
+                if is_debug_mode():
+                    print(f"[DEBUG] Component scores: {calculator.component_scores}")
+                    if calculator.matched_rule:
+                        print(f"[DEBUG] Matched rule: '{calculator.matched_rule}'")
+            else:
+                # Use old hardcoded salience gate (backwards compatible)
+                is_salient = self.salience_gate.is_worth_saving(conversation_text)
+                salience_elapsed = time.time() - salience_start
+                print(f"[CONSOLIDATE] Salience check took {salience_elapsed:.2f}s, result: {is_salient}")
+
             if not is_salient:
                 if is_debug_mode():
                     print(f"[DEBUG] Conversation not salient. Exiting consolidation thread.")

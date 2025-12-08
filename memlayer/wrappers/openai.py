@@ -61,11 +61,13 @@ class OpenAI(BaseLLMWrapper):
         operation_mode: str = "online",
         scheduler_interval_seconds: int = 60,  # For tasks
         curation_interval_seconds: int = 3600,  # For curation
+        salience_config: Optional["TenantSalienceConfig"] = None,  # NEW
+        tenant_id: Optional[str] = None,  # NEW
         **kwargs
     ):
         """
         Initialize a memory-enhanced OpenAI client.
-        
+
         Args:
             api_key: OpenAI API key (if None, will use OPENAI_API_KEY env var)
             model: Model name to use (e.g., "gpt-4.1", "gpt-4.1-mini")
@@ -75,8 +77,11 @@ class OpenAI(BaseLLMWrapper):
             embedding_model: Custom embedding model (defaults to LocalEmbeddingModel)
             salience_threshold: Threshold for memory worthiness (-0.1 to 0.2, default 0.0)
                               Lower = more permissive, Higher = more strict
-            operation_mode: Memory mode - "local" (sentence-transformers), 
+            operation_mode: Memory mode - "local" (sentence-transformers),
                           "online" (OpenAI embeddings API), or "lightweight" (graph-only, no embeddings)
+            salience_config: (NEW) Custom salience configuration (TenantSalienceConfig).
+                           If provided, overrides the default salience threshold.
+            tenant_id: (NEW) Tenant identifier for multi-tenancy. Defaults to user_id if not provided.
             **kwargs: Additional arguments passed to openai.OpenAI()
         """
         self.model = model
@@ -88,6 +93,8 @@ class OpenAI(BaseLLMWrapper):
         self._provided_embedding_model = embedding_model
         self.scheduler_interval_seconds = scheduler_interval_seconds
         self.curation_interval_seconds = curation_interval_seconds
+        self.salience_config = salience_config  # NEW
+        self.tenant_id = tenant_id or user_id  # NEW: Default to user_id
         # Lazy-loaded attributes
         self._embedding_model = None
         self._vector_storage = None
@@ -252,9 +259,20 @@ class OpenAI(BaseLLMWrapper):
                 self.graph_storage,
                 self.embedding_model,
                 self.salience_gate,
-                llm_client=self
+                llm_client=self,
+                salience_config=self.salience_config,  # NEW
+                tenant_id=self.tenant_id  # NEW
             )
         return self._consolidation_service
+
+    def get_salience_logs(self):
+        """
+        Get salience computation logs (only available when using custom salience_config).
+
+        Returns:
+            List of salience computation logs with scores, decisions, and reasoning.
+        """
+        return self.consolidation_service.salience_logs
     
     def chat(self, messages: List[Dict[str, str]], stream: bool = False, **kwargs):
         """
