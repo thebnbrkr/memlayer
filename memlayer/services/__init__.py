@@ -6,15 +6,15 @@ from typing import List, Dict, Any, Optional
 
 import dateutil
 import numpy as np
-from .storage.networkx import NetworkXStorage
-from .storage.chroma import ChromaStorage
-from .storage.memgraph import MemgraphStorage
-from .embedding_models import BaseEmbeddingModel
-from .wrappers.base import BaseLLMWrapper
-from .observability import Trace
-from .ml_gate import SalienceGate
-from .storage.base import BaseGraphStorage
-from .config import is_debug_mode
+from ..storage.networkx import NetworkXStorage
+from ..storage.chroma import ChromaStorage
+from ..storage.memgraph import MemgraphStorage
+from ..embedding_models import BaseEmbeddingModel
+from ..wrappers.base import BaseLLMWrapper
+from ..observability import Trace
+from ..ml_gate import SalienceGate
+from ..storage.base import BaseGraphStorage
+from ..config import is_debug_mode
 class SearchService:
     """
     Handles memory retrieval with built-in caching and observability.
