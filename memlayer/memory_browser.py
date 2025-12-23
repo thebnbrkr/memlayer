@@ -13,6 +13,7 @@ Works with any vector backend (Chroma, Qdrant, Zilliz).
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 import json
+import statistics
 
 
 class MemoryBrowser:
@@ -26,6 +27,8 @@ class MemoryBrowser:
         browser.show_all()  # List all memories
         browser.search("project")  # Search memories
         browser.print_stats()  # Show statistics
+        browser.show_embeddings()  # View embeddings info
+        browser.filter_by_importance()  # Filter by importance score
         browser.export_json("memories.json")  # Export data
     """
 
@@ -374,3 +377,158 @@ class MemoryBrowser:
         except Exception as e:
             print(f"❌ Error archiving memory: {e}")
             return False
+
+    def show_embeddings(
+        self,
+        user_id: Optional[str] = None,
+        max_items: int = 10,
+        show_vector: bool = False,
+        truncate_vector: int = 10
+    ):
+        """
+        Display embeddings information for stored memories.
+
+        This method shows embedding metadata and optionally the actual
+        embedding vectors stored in the vector database.
+
+        Args:
+            user_id: Optional filter by user_id
+            max_items: Maximum number of memories to show
+            show_vector: If True, display actual embedding vectors
+            truncate_vector: Number of dimensions to show (when show_vector=True)
+
+        Note:
+            Embedding vectors are typically 384-1536 dimensions. Displaying
+            full vectors is usually not useful, so truncate_vector limits
+            the number of dimensions shown.
+        """
+        # Check if storage supports embeddings
+        if not hasattr(self.storage, 'collection'):
+            print("❌ This storage backend does not support embeddings view.")
+            print("   (LIGHTWEIGHT mode uses graph-only storage)")
+            return
+
+        try:
+            # Get memories with embeddings from ChromaDB
+            if user_id:
+                results = self.storage.collection.get(
+                    where={"user_id": {"$eq": user_id}},
+                    include=["metadatas", "embeddings"]
+                )
+            else:
+                results = self.storage.collection.get(
+                    include=["metadatas", "embeddings"]
+                )
+
+            if not results or not results.get('ids'):
+                print("📭 No embeddings found.")
+                return
+
+            ids = results['ids']
+            metadatas = results.get('metadatas', [])
+            embeddings = results.get('embeddings', [])
+
+            print("\n" + "=" * 70)
+            print(f"  🧠 Embeddings Information ({len(ids)} memories)")
+            if user_id:
+                print(f"  Filtered by user_id: {user_id}")
+            print("=" * 70 + "\n")
+
+            # Determine embedding dimension
+            if embeddings and len(embeddings) > 0 and embeddings[0]:
+                dimension = len(embeddings[0])
+                print(f"📐 Embedding dimension: {dimension}")
+                print(f"   (Typical: 384 for MiniLM, 1536 for OpenAI)\n")
+            else:
+                print("📐 Embedding dimension: Unknown (no embeddings stored)\n")
+                dimension = 0
+
+            for i, mem_id in enumerate(ids[:max_items]):
+                metadata = metadatas[i] if i < len(metadatas) else {}
+                content = metadata.get('content', '')[:60] + "..."
+
+                print(f"{i+1}. {content}")
+                print(f"   ID: {mem_id}")
+
+                if embeddings and i < len(embeddings) and embeddings[i]:
+                    embedding = embeddings[i]
+                    # Calculate embedding statistics
+                    embedding_min = min(embedding)
+                    embedding_max = max(embedding)
+                    embedding_mean = statistics.mean(embedding)
+                    embedding_std_dev = statistics.stdev(embedding) if len(embedding) > 1 else 0
+
+                    print(f"   Embedding stats: min={embedding_min:.4f}, max={embedding_max:.4f}, "
+                          f"mean={embedding_mean:.4f}, std={embedding_std_dev:.4f}")
+
+                    if show_vector:
+                        truncated = embedding[:truncate_vector]
+                        formatted = [f"{v:.4f}" for v in truncated]
+                        print(f"   Vector (first {truncate_vector}): [{', '.join(formatted)}, ...]")
+                else:
+                    print("   Embedding: Not available")
+
+                print()
+
+            if len(ids) > max_items:
+                print(f"... and {len(ids) - max_items} more embeddings")
+                print(f"    (showing first {max_items})")
+
+            print("=" * 70)
+
+        except Exception as e:
+            print(f"❌ Error fetching embeddings: {e}")
+
+    def get_embeddings(
+        self,
+        user_id: Optional[str] = None,
+        memory_ids: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get raw embedding data for memories.
+
+        Args:
+            user_id: Optional filter by user_id
+            memory_ids: Optional list of specific memory IDs to fetch
+
+        Returns:
+            List of dicts containing id, content, and embedding vector
+        """
+        if not hasattr(self.storage, 'collection'):
+            print("❌ This storage backend does not support embeddings.")
+            return []
+
+        try:
+            if memory_ids:
+                results = self.storage.collection.get(
+                    ids=memory_ids,
+                    include=["metadatas", "embeddings"]
+                )
+            elif user_id:
+                results = self.storage.collection.get(
+                    where={"user_id": {"$eq": user_id}},
+                    include=["metadatas", "embeddings"]
+                )
+            else:
+                results = self.storage.collection.get(
+                    include=["metadatas", "embeddings"]
+                )
+
+            memories_with_embeddings = []
+            ids = results.get('ids', [])
+            metadatas = results.get('metadatas', [])
+            embeddings = results.get('embeddings', [])
+
+            for i, mem_id in enumerate(ids):
+                memories_with_embeddings.append({
+                    'id': mem_id,
+                    'content': metadatas[i].get('content', '') if i < len(metadatas) else '',
+                    'metadata': metadatas[i] if i < len(metadatas) else {},
+                    'embedding': embeddings[i] if embeddings and i < len(embeddings) else None
+                })
+
+            return memories_with_embeddings
+
+        except Exception as e:
+            print(f"❌ Error fetching embeddings: {e}")
+            return []
